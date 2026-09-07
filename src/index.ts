@@ -89,6 +89,88 @@ function serializeFolder(folder: TreeFolder): Record<string, unknown> {
   };
 }
 
+type MatrixField = { id: number; label: string; fieldType: string };
+
+/**
+ * Resolve a field label to its config entry for a given item type, using the
+ * same case-insensitive label match the Matrix SDK uses (getFieldId). Throws a
+ * helpful error listing the available fields when no match is found.
+ */
+function resolveField(
+  proj: Project,
+  itemType: string,
+  fieldName: string,
+  project: string
+): MatrixField {
+  const fields = (proj.getItemConfig().getFields(itemType) ?? []) as MatrixField[];
+  if (fields.length === 0) {
+    throw new Error(`No fields found for item type '${itemType}' in project '${project}'.`);
+  }
+  const target = fields.find((f) => f.label.toLowerCase() === fieldName.toLowerCase());
+  if (!target) {
+    throw new Error(
+      `Field '${fieldName}' not found for item type '${itemType}'. ` +
+        `Available fields: ${fields.map((f) => `${f.label} (${f.fieldType})`).join(", ")}`
+    );
+  }
+  return target;
+}
+
+/**
+ * Write one or more field values via the Matrix REST v1 item PUT.
+ *
+ * This deliberately bypasses the SDK's setField/setFields path, which has two
+ * defects that corrupted earlier description writes:
+ *
+ *  1. Field values MUST be nested under `itemProperties` (`{ "fx<id>": value }`).
+ *     The Matrix server only reads field values from there. The previous raw
+ *     PUT placed `fx<id>` at the top level of the body, which the server
+ *     silently ignores — so the call returned HTTP 200 ("success") while
+ *     writing nothing. That is why every SPEC description came back empty.
+ *
+ *  2. We never send `linksAreComplete`, so it defaults to 0 (append-only) and
+ *     existing up/downlinks are left untouched. The SDK's setFields path
+ *     hardcodes `linksAreComplete: 1` while sending no links, which makes the
+ *     server treat the complete link set as empty and wipe every trace link.
+ *     That is the REQ->SPEC downlink loss seen with set_field.
+ *
+ * `onlyThoseFields`/`onlyThoseLabels` keep the write scoped to the named fields
+ * so no other field or label is disturbed.
+ */
+async function putItemFields(
+  project: string,
+  itemId: string,
+  fields: Array<{ id: number; value: string }>,
+  reason: string
+): Promise<void> {
+  const itemProperties: Record<string, string> = {};
+  for (const f of fields) {
+    itemProperties[`fx${f.id}`] = f.value;
+  }
+
+  const restUrl = `${MATRIX_URL}/rest/1/${encodeURIComponent(project)}/item/${encodeURIComponent(itemId)}`;
+  const response = await fetch(restUrl, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Token ${MATRIX_TOKEN}`,
+    },
+    body: JSON.stringify({
+      reason,
+      onlyThoseFields: 1,
+      onlyThoseLabels: 1,
+      itemProperties,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `Matrix REST API returned HTTP ${response.status} when updating fields of '${itemId}': ${errorText}`
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // MCP Server
 // ---------------------------------------------------------------------------
@@ -267,12 +349,16 @@ server.tool(
     }
     const savedItem = await folder.saveInFolder(item);
 
-    // Set fields if provided
+    // Set fields if provided. Resolve labels to ids and write through the same
+    // link-preserving REST PUT used elsewhere, instead of proj.setFields (which
+    // nests values incorrectly and wipes links via linksAreComplete:1).
     if (fields && fields.length > 0) {
-      await proj.setFields(
-        savedItem.getId(),
-        fields.map((f) => ({ fieldName: f.fieldName, value: f.value }))
-      );
+      const itemType = savedItem.getType();
+      const resolved = fields.map((f) => ({
+        id: resolveField(proj, itemType, f.fieldName, project).id,
+        value: f.value,
+      }));
+      await putItemFields(project, savedItem.getId(), resolved, reason);
     }
 
     // Re-fetch to get the updated item
@@ -387,74 +473,34 @@ server.tool(
     const item = await proj.getItem(itemId);
     const itemType = item.getType();
 
-    // Retrieve the field list for this category.
-    const config = proj.getItemConfig();
-    const fields = (config.getFields(itemType) ?? []) as Array<{
-      id: number;
-      label: string;
-      fieldType: string;
-    }>;
-
-    if (fields.length === 0) {
-      throw new Error(`No fields found for item type '${itemType}' in project '${project}'.`);
-    }
-
-    // Locate the target field: prefer an explicit label match, then fall back
-    // to the first richtext field, then to any field whose label contains
-    // "description" (case-insensitive).
-    let targetField: { id: number; label: string; fieldType: string } | undefined;
+    // Locate the target field.
+    let targetField: MatrixField;
 
     if (fieldName) {
-      targetField = fields.find(
-        (f) => f.label.toLowerCase() === fieldName.toLowerCase()
-      );
-      if (!targetField) {
+      // Explicit label match (case-insensitive), same as the SDK's getFieldId.
+      targetField = resolveField(proj, itemType, fieldName, project);
+    } else {
+      // Auto-detect: first richtext field, then first field whose label
+      // contains "description".
+      const fields = (proj.getItemConfig().getFields(itemType) ?? []) as MatrixField[];
+      if (fields.length === 0) {
+        throw new Error(`No fields found for item type '${itemType}' in project '${project}'.`);
+      }
+      const detected =
+        fields.find((f) => f.fieldType === "richtext") ??
+        fields.find((f) => f.label.toLowerCase().includes("description"));
+      if (!detected) {
         throw new Error(
-          `Field '${fieldName}' not found for item type '${itemType}'. ` +
+          `No richtext/description field found for item type '${itemType}'. ` +
             `Available fields: ${fields.map((f) => `${f.label} (${f.fieldType})`).join(", ")}`
         );
       }
-    } else {
-      // Auto-detect: first richtext field, then first field whose label contains "description".
-      targetField =
-        fields.find((f) => f.fieldType === "richtext") ??
-        fields.find((f) => f.label.toLowerCase().includes("description"));
+      targetField = detected;
     }
 
-    if (!targetField) {
-      throw new Error(
-        `No richtext/description field found for item type '${itemType}'. ` +
-          `Available fields: ${fields.map((f) => `${f.label} (${f.fieldType})`).join(", ")}`
-      );
-    }
-
-    // Build the REST v1 PUT body and call Matrix directly.
-    // This bypasses the SDK's label-based field lookup which can fail when the
-    // configured label does not match the name the caller supplies.
-    const restUrl = `${MATRIX_URL}/rest/1/${encodeURIComponent(project)}/item/${encodeURIComponent(itemId)}`;
-
-    const body: Record<string, unknown> = {
-      reason,
-      onlyThoseFields: 1,
-      onlyThoseLabels: 1,
-      [`fx${targetField.id}`]: description,
-    };
-
-    const response = await fetch(restUrl, {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Token ${MATRIX_TOKEN}`,
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(
-        `Matrix REST API returned HTTP ${response.status} when updating description of '${itemId}': ${errorText}`
-      );
-    }
+    // Write via the corrected REST PUT: nests the value under itemProperties so
+    // it is actually persisted, and leaves existing trace links untouched.
+    await putItemFields(project, itemId, [{ id: targetField.id, value: description }], reason);
 
     // Re-fetch so the returned item reflects the new value.
     const updatedItem = await proj.getItem(itemId);
@@ -490,9 +536,14 @@ server.tool(
     reason: z.string().describe("Change reason/comment (required by Matrix for audit trail)"),
   },
   async ({ project, itemId, fieldName, value, reason }) => {
-    await setReason(reason);
     const proj = await getProject(project);
-    const result = await proj.setField(itemId, fieldName, value);
+    const itemType = (await proj.getItem(itemId)).getType();
+    const field = resolveField(proj, itemType, fieldName, project);
+
+    // Use the link-preserving REST PUT instead of proj.setField. The SDK's
+    // setField sends linksAreComplete:1 with no links, which wipes the item's
+    // existing trace links on every field write.
+    await putItemFields(project, itemId, [{ id: field.id, value }], reason);
     return {
       content: [
         {
@@ -521,9 +572,16 @@ server.tool(
     reason: z.string().describe("Change reason/comment (required by Matrix for audit trail)"),
   },
   async ({ project, itemId, fields, reason }) => {
-    await setReason(reason);
     const proj = await getProject(project);
-    await proj.setFields(itemId, fields);
+    const itemType = (await proj.getItem(itemId)).getType();
+
+    // Resolve every field label to its id, then write through the
+    // link-preserving REST PUT (the SDK's setFields wipes trace links).
+    const resolved = fields.map((f) => ({
+      id: resolveField(proj, itemType, f.fieldName, project).id,
+      value: f.value,
+    }));
+    await putItemFields(project, itemId, resolved, reason);
     return {
       content: [
         {
