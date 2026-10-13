@@ -38,6 +38,11 @@ async function getSDK(): Promise<StandaloneMatrixSDK> {
     sdk = await createConsoleAPI({
       token: `Token ${MATRIX_TOKEN}`,
       url: MATRIX_URL!,
+    }).catch(async (err: unknown) => {
+      if (err instanceof Response) {
+        throw new Error(`Matrix login failed ${err.status} ${err.statusText} (${err.url}): ${await err.text()}`);
+      }
+      throw err;
     });
   }
   return sdk;
@@ -189,6 +194,30 @@ server.tool("list_projects", "List all projects on the Matrix instance", {}, asy
     content: [{ type: "text", text: JSON.stringify(projects, null, 2) }],
   };
 });
+
+// ---- List Groups ----------------------------------------------------------
+
+server.tool(
+  "list_groups",
+  "List all user groups on the Matrix instance, optionally with members and project permissions (details require ADMIN)",
+  {
+    details: z.boolean().optional().default(false).describe("Include membership and permissions (requires ADMIN)"),
+  },
+  async ({ details }) => {
+    const api = await getSDK();
+    // The SDK has no high-level wrapper for groups, so call the generated REST client directly.
+    const result = await (api as any).instance.groupGet(details ? 1 : 0).catch(async (err: unknown) => {
+      // The generated client rejects with the raw fetch Response on HTTP errors.
+      if (err instanceof Response) {
+        throw new Error(`Matrix API ${err.status} ${err.statusText} (${err.url}): ${await err.text()}`);
+      }
+      throw err;
+    });
+    return {
+      content: [{ type: "text", text: JSON.stringify(result.groups ?? [], null, 2) }],
+    };
+  }
+);
 
 // ---- Get Project Info -----------------------------------------------------
 
