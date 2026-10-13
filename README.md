@@ -136,11 +136,12 @@ project (directory) you are currently in.
 
 ### TODOs & Audit
 
-| Tool | Description |
-|---|---|
-| `get_todos` | Get TODOs for a project |
-| `get_open_trainings` | Get open training TODOs per user, for one or all projects |
-| `get_audit` | Get the change/audit log |
+| Tool                   | Description                                                                      |
+|------------------------|----------------------------------------------------------------------------------|
+| `get_todos`            | Get TODOs for a project                                                          |
+| `get_open_trainings`   | Get open training TODOs per user, for one or all projects                        |
+| `get_training_changes` | For a user's open trainings, what changed since the version they last trained on |
+| `get_audit`            | Get the change/audit log                                                         |
 
 ### Document Generation
 

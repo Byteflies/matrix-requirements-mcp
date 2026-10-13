@@ -56,6 +56,60 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&amp;/g, "&");
 }
 
+/** Convert rich-text HTML into plain-text paragraphs, one per line, so versions can be diffed. */
+function htmlToLines(html: string): string[] {
+  const text = html
+    .replace(/<li[^>]*>/gi, "\n• ")
+    .replace(/<\/?(p|div|br|h[1-6]|tr|ul|ol|table)\b[^>]*>/gi, "\n")
+    .replace(/<\/t[dh]>/gi, " | ")
+    .replace(/<[^>]+>/g, "");
+  return decodeHtmlEntities(text)
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter((line) => line && line !== "•" && line !== "|");
+}
+
+/**
+ * Line-based diff (LCS) rendered as "- removed" / "+ added" lines with one line of context;
+ * long unchanged stretches collapse to "…". Returns null when nothing changed.
+ */
+function diffLines(before: string[], after: string[]): string | null {
+  const n = before.length;
+  const m = after.length;
+  if (n * m > 4_000_000) return `(too large to diff line by line: ${n} lines before, ${m} lines after)`;
+
+  // lcs[i][j] = length of the longest common subsequence of before[i..] and after[j..]
+  const lcs = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      lcs[i][j] = before[i] === after[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+    }
+  }
+
+  const ops: { kind: " " | "-" | "+"; line: string }[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n || j < m) {
+    if (i < n && j < m && before[i] === after[j]) {
+      ops.push({ kind: " ", line: before[i++] });
+      j++;
+    } else if (i < n && (j === m || lcs[i + 1][j] >= lcs[i][j + 1])) {
+      ops.push({ kind: "-", line: before[i++] });
+    } else {
+      ops.push({ kind: "+", line: after[j++] });
+    }
+  }
+  if (ops.every((op) => op.kind === " ")) return null;
+
+  const isChange = (k: number) => ops[k] !== undefined && ops[k].kind !== " ";
+  const out: string[] = [];
+  ops.forEach((op, k) => {
+    if (isChange(k) || isChange(k - 1) || isChange(k + 1)) out.push(`${op.kind} ${op.line}`);
+    else if (out[out.length - 1] !== "…") out.push("…");
+  });
+  return out.join("\n");
+}
+
 let sdk: StandaloneMatrixSDK | null = null;
 
 async function getSDK(): Promise<StandaloneMatrixSDK> {
@@ -962,6 +1016,153 @@ server.tool(
     };
     return {
       content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
+    };
+  }
+);
+
+// ---- Get Training Changes -------------------------------------------------
+
+const TEXT_FIELD_TYPES = new Set(["richtext", "text", "textline"]);
+
+/** Text fields of a REST item; type and name come from the project config, as the REST response may omit them. */
+function textFields(item: any, config: Map<number, MatrixField>): { name: string; lines: string[] }[] {
+  return ((item.fieldValList?.fieldVal ?? []) as any[])
+    .filter((f) => TEXT_FIELD_TYPES.has(config.get(f.id)?.fieldType ?? f.fieldType) && f.value)
+    .map((f) => ({ name: config.get(f.id)?.label ?? f.fieldName ?? `field ${f.id}`, lines: htmlToLines(f.value) }));
+}
+
+function truncate(text: string, maxChars: number): string {
+  return text.length <= maxChars
+    ? text
+    : `${text.slice(0, maxChars)}\n… (truncated, ${text.length - maxChars} more characters; raise maxChars to see more)`;
+}
+
+/**
+ * Compare the item as released for the open training (its state when the todo was created) against
+ * the item as released for the user's last completed training on it. Using the todos' creation dates
+ * rather than the live item excludes draft edits made after the release.
+ */
+async function buildTrainingChanges(rest: any, todo: any, login: string, maxChars: number) {
+  const project = todo.projectShort;
+  const ref = todo.itemRef;
+  const category = ref.replace(/-\d+$/, "");
+  const fields = (await getProject(project)).getItemConfig().getFields(category) as MatrixField[] | undefined;
+  const config = new Map((fields ?? []).map((f) => [f.id, f]));
+  const [current, itemTodos, target] = await Promise.all([
+    rest.projectItemItemGet(project, ref, 1),
+    rest.projectTodoGet(project, ref, 1, 1, 0),
+    rest.projectItemItemGet(project, ref, 0, 0, undefined, todo.createdAt),
+  ]);
+
+  const versions = ((current.itemHistoryList?.itemHistory ?? []) as any[]).sort((a, b) => a.version - b.version);
+  const versionAt = (date: string) => versions.filter((v) => v.createdAt <= date).at(-1)?.version;
+  const toVersion = versionAt(todo.createdAt);
+
+  const training = {
+    project,
+    itemRef: ref,
+    title: decodeHtmlEntities(target.title ?? current.title ?? ""),
+    url: `${MATRIX_URL}/${project}/${ref}`,
+    liveQmsUrl: liveQmsUrl(project, ref, login),
+    assignedAt: todo.createdAt,
+    version: toVersion,
+  };
+
+  const previous = ((itemTodos.todos ?? []) as any[])
+    .filter((t) => isTraining(t) && t.login === login && t.closedAt && t.createdAt < todo.createdAt)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    .at(-1);
+
+  if (!previous) {
+    const content = textFields(target, config)
+      .map((f) => `## ${f.name}\n${f.lines.join("\n")}`)
+      .join("\n\n");
+    return {
+      ...training,
+      lastTrainedOn: null,
+      note: "No earlier completed training on this item, so this is a first training: the whole content is new.",
+      content: truncate(content, maxChars),
+    };
+  }
+
+  const baseline = await rest.projectItemItemGet(project, ref, 0, 0, undefined, previous.createdAt);
+  const fromVersion = versionAt(previous.createdAt);
+
+  const before = new Map(textFields(baseline, config).map((f) => [f.name, f.lines]));
+  const changes: string[] = [];
+  const targetFields = textFields(target, config);
+  for (const field of targetFields) {
+    const diff = diffLines(before.get(field.name) ?? [], field.lines);
+    before.delete(field.name);
+    if (diff) changes.push(`## ${field.name}\n${diff}`);
+  }
+  for (const [name, lines] of before) {
+    changes.push(`## ${name} (field removed)\n${lines.map((line) => `- ${line}`).join("\n")}`);
+  }
+
+  return {
+    ...training,
+    lastTrainedOn: { assignedAt: previous.createdAt, completedAt: previous.closedAt, version: fromVersion },
+    changeLog: versions
+      .filter((v) => fromVersion !== undefined && v.version > fromVersion && toVersion !== undefined && v.version <= toVersion)
+      .map((v) => ({ version: v.version, date: v.createdAt, by: v.createdByUserLogin, reason: v.reason })),
+    textFieldsCompared: targetFields.length,
+    changes: changes.length
+      ? truncate(changes.join("\n\n"), maxChars)
+      : "No text changes; the new version may only differ in links, labels or non-text fields.",
+  };
+}
+
+server.tool(
+  "get_training_changes",
+  "For a user's open trainings (oldest first), return what changed in each document since the version the user " +
+    "last trained on: the change log of versions in between and a paragraph-level diff of the text fields " +
+    "('-' removed, '+' added, '…' unchanged text skipped). If there is no earlier training, returns the content " +
+    "instead. Each training has a liveQmsUrl: the live QMS view where the user reads the document and confirms " +
+    "the training. Page with assignedAfter = the previous call's nextAssignedAfter.",
+  {
+    login: z.string().describe("User login whose open trainings to compare"),
+    project: z.string().optional().describe("Project short name; omit to scan all projects"),
+    itemRef: z.string().optional().describe("Only this item (e.g. PROC-162)"),
+    limit: z.number().int().min(1).max(20).optional().default(5).describe("Number of trainings to process"),
+    assignedAfter: z
+      .string()
+      .optional()
+      .describe("Only trainings assigned after this ISO timestamp; pass the previous call's nextAssignedAfter to page"),
+    maxChars: z.number().int().min(500).optional().default(8000).describe("Truncate each item's changes/content to this many characters"),
+  },
+  async ({ login, project, itemRef, limit, assignedAfter, maxChars }) => {
+    const api = await getSDK();
+    const rest = (api as any).instance;
+    const errors: Record<string, string> = {};
+
+    const open = (await fetchOpenTrainings(api, project, false, errors))
+      .filter((t) => t.login === login && (!itemRef || t.itemRef === itemRef))
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    // Page by assignment date rather than position: completing a training between calls would shift positions.
+    const pending = assignedAfter ? open.filter((t) => t.createdAt > assignedAfter) : open;
+    const batch = pending.slice(0, limit);
+
+    const trainings = await Promise.all(
+      batch.map(async (todo) => {
+        try {
+          return await buildTrainingChanges(rest, todo, login, maxChars);
+        } catch (err: unknown) {
+          return { project: todo.projectShort, itemRef: todo.itemRef, error: await describeError(err) };
+        }
+      })
+    );
+
+    const result = {
+      login,
+      totalOpen: open.length,
+      remaining: pending.length - batch.length,
+      ...(pending.length > batch.length ? { nextAssignedAfter: batch[batch.length - 1].createdAt } : {}),
+      trainings,
+      ...(Object.keys(errors).length ? { errors } : {}),
+    };
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
     };
   }
 );
