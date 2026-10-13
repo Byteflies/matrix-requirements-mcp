@@ -130,9 +130,10 @@ project (directory) you are currently in.
 
 ### TODOs & Audit
 
-| Tool        | Description              |
-|-------------|--------------------------|
-| `get_todos` | Get TODOs for a project  |
+| Tool | Description |
+|---|---|
+| `get_todos` | Get TODOs for a project |
+| `get_open_trainings` | Get open training TODOs per user, for one or all projects |
 | `get_audit` | Get the change/audit log |
 
 ### Document Generation

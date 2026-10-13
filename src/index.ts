@@ -15,7 +15,8 @@ import {
 // Configuration
 // ---------------------------------------------------------------------------
 
-const MATRIX_URL = process.env.MATRIX_URL;
+// Strip trailing slashes: the SDK appends "/rest/1/", and "//rest" serves the web app's HTML instead of the API.
+const MATRIX_URL = process.env.MATRIX_URL?.replace(/\/+$/, "");
 const MATRIX_TOKEN = process.env.MATRIX_TOKEN;
 
 if (!MATRIX_URL || !MATRIX_TOKEN) {
@@ -31,6 +32,30 @@ if (!MATRIX_URL || !MATRIX_TOKEN) {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * The SDK's generated REST client rejects with the raw fetch Response on HTTP errors. It uses
+ * node-fetch, whose Response is not the global one, so `instanceof Response` can't be used.
+ */
+async function describeError(err: unknown): Promise<string> {
+  if (err && typeof err === "object" && "status" in err && typeof (err as any).text === "function") {
+    const res = err as { status: number; statusText: string; url: string; text(): Promise<string> };
+    return `${res.status} ${res.statusText} (${res.url}): ${await res.text()}`;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+function decodeHtmlEntities(text: string): string {
+  return text
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#0*39;|&apos;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))
+    .replace(/&amp;/g, "&");
+}
+
 let sdk: StandaloneMatrixSDK | null = null;
 
 async function getSDK(): Promise<StandaloneMatrixSDK> {
@@ -39,10 +64,7 @@ async function getSDK(): Promise<StandaloneMatrixSDK> {
       token: `Token ${MATRIX_TOKEN}`,
       url: MATRIX_URL!,
     }).catch(async (err: unknown) => {
-      if (err instanceof Response) {
-        throw new Error(`Matrix login failed ${err.status} ${err.statusText} (${err.url}): ${await err.text()}`);
-      }
-      throw err;
+      throw new Error(`Matrix login failed: ${await describeError(err)}`);
     });
   }
   return sdk;
@@ -207,11 +229,7 @@ server.tool(
     const api = await getSDK();
     // The SDK has no high-level wrapper for groups, so call the generated REST client directly.
     const result = await (api as any).instance.groupGet(details ? 1 : 0).catch(async (err: unknown) => {
-      // The generated client rejects with the raw fetch Response on HTTP errors.
-      if (err instanceof Response) {
-        throw new Error(`Matrix API ${err.status} ${err.statusText} (${err.url}): ${await err.text()}`);
-      }
-      throw err;
+      throw new Error(`Matrix API ${await describeError(err)}`);
     });
     return {
       content: [{ type: "text", text: JSON.stringify(result.groups ?? [], null, 2) }],
@@ -827,6 +845,123 @@ server.tool(
     const todos = await proj.getTodos(itemRef, includeDone, includeAllUsers);
     return {
       content: [{ type: "text", text: JSON.stringify(todos, null, 2) }],
+    };
+  }
+);
+
+// ---- Get Open Trainings ---------------------------------------------------
+
+/** Link to the item in the live QMS (published) view, where users read documents and confirm training. */
+function liveQmsUrl(project: string, itemRef: string, login: string): string {
+  const query = new URLSearchParams({ USER: login, show: itemRef });
+  return `${MATRIX_URL}/pub/${encodeURIComponent(project)}?${query}`;
+}
+
+/** The server puts a todo's type and text under `action`, not at the top level as the SDK types suggest. */
+function isTraining(todo: any): boolean {
+  return todo.action?.todoType === "needTraining";
+}
+
+/**
+ * Fetch open training todos for all users, in one project or across all projects. Per-project
+ * failures are recorded in `errors` so one inaccessible project doesn't fail the whole scan.
+ */
+async function fetchOpenTrainings(
+  api: StandaloneMatrixSDK,
+  project: string | undefined,
+  includeFuture: boolean,
+  errors: Record<string, string>
+): Promise<any[]> {
+  const projects = project ? [project] : await api.getProjects();
+  const results = await Promise.all(
+    projects.map(async (p) => {
+      try {
+        // Call the REST client directly so we don't have to open (and load the config of) every project.
+        const ack = await (api as any).instance.projectTodoGet(p, undefined, 0, 1, includeFuture ? 1 : 0);
+        return (ack.todos ?? []) as any[];
+      } catch (err: unknown) {
+        errors[p] = await describeError(err);
+        return [];
+      }
+    })
+  );
+  return results.flat().filter(isTraining);
+}
+
+server.tool(
+  "get_open_trainings",
+  "Get open training TODOs (needTraining) grouped by user, for one project or all projects (other users' trainings may require ADMIN)",
+  {
+    project: z.string().optional().describe("Project short name; omit to scan all projects"),
+    login: z.string().optional().describe("Only return trainings for this user login (returns full details with title and URL; otherwise a per-user count and item list)"),
+    includeFuture: z.boolean().optional().default(false).describe("Include trainings scheduled for a future date"),
+  },
+  async ({ project, login, includeFuture }) => {
+    const api = await getSDK();
+    const errors: Record<string, string> = {};
+    const trainings = await fetchOpenTrainings(api, project, includeFuture, errors);
+
+    const byUser: Record<string, any[]> = {};
+    for (const todo of trainings) {
+      if (login && todo.login !== login) continue;
+      (byUser[todo.login ?? "unknown"] ??= []).push(todo);
+    }
+
+    // Look up titles with one tree call per project that has trainings, rather than one call per item.
+    const titles = new Map<string, string>();
+    if (login) {
+      const trainingProjects = [...new Set(Object.values(byUser).flat().map((t) => t.projectShort as string))];
+      await Promise.all(
+        trainingProjects.map(async (p) => {
+          try {
+            // "yes" requests the fancy tree (id/title/children), which is what the SDK itself uses.
+            const tree = await (api as any).instance.projectTreeGet(p, "yes");
+            const walk = (nodes: any[] = []) => {
+              for (const node of nodes) {
+                // Titles come back HTML-escaped (e.g. "&amp;").
+                if (node.id && node.title) titles.set(`${p}/${node.id}`, decodeHtmlEntities(node.title));
+                walk(node.children);
+              }
+            };
+            walk(tree);
+          } catch (err: unknown) {
+            errors[p] = `titles unavailable: ${await describeError(err)}`;
+          }
+        })
+      );
+    }
+
+    // Instance-wide there can be thousands of open trainings, so only return full details for a single user.
+    const users = Object.fromEntries(
+      Object.entries(byUser)
+        .sort(([, a], [, b]) => b.length - a.length)
+        .map(([user, todos]) => [
+          user,
+          login
+            ? todos.map((t) => ({
+                todoId: t.todoId,
+                project: t.projectShort,
+                itemRef: t.itemRef,
+                title: titles.get(`${t.projectShort}/${t.itemRef}`),
+                url: `${MATRIX_URL}/${t.projectShort}/${t.itemRef}`,
+                liveQmsUrl: liveQmsUrl(t.projectShort, t.itemRef, user),
+                text: t.action?.text,
+                createdAt: t.createdAt,
+                future: t.future,
+              }))
+            : { count: todos.length, items: todos.map((t) => `${t.projectShort}/${t.itemRef}`) },
+        ])
+    );
+
+    const summary = {
+      totalOpen: Object.values(byUser).reduce((n, list) => n + list.length, 0),
+      // In summary mode, an item's URL is `${baseUrl}/${item}` (e.g. QMS/WI-543).
+      ...(login ? {} : { baseUrl: MATRIX_URL }),
+      byUser: users,
+      ...(Object.keys(errors).length ? { errors } : {}),
+    };
+    return {
+      content: [{ type: "text", text: JSON.stringify(summary, null, 2) }],
     };
   }
 );
