@@ -11,12 +11,13 @@ instance. Provides full CRUD access to projects, items, folders, links, labels, 
 
 ## Setup
 
-### 1. Install dependencies and build
+### 1. Clone the repository
 
 ```bash
-npm install
-npm run build
+git clone git@github.com:Byteflies/matrix-requirements-mcp.git
 ```
+
+The repository includes the pre-built server (`dist/index.js`), so there is no need to install dependencies or build.
 
 ### 2. Configuration Variables
 
@@ -82,6 +83,15 @@ claude mcp add matrix-requirements \
 
 **Note:** `--scope user` makes the MCP available to all projects on your machine. Omitting it only registers it for the
 project (directory) you are currently in.
+
+### Updating
+
+Pull the latest version and restart Claude (Desktop) or start a new Claude Code session:
+
+```bash
+cd $PATH_TO_PROJECT
+git pull
+```
 
 ## Available Tools
 
@@ -165,3 +175,6 @@ npm run dev    # Watch mode - recompiles on changes
 npm run build  # One-time build
 npm start      # Run the server
 ```
+
+`dist/index.js` is committed so end-users don't need to build. Always run `npm run build` and commit the updated
+`dist/index.js` together with your source changes.
