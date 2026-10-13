@@ -176,5 +176,5 @@ npm run build  # One-time build
 npm start      # Run the server
 ```
 
-`dist/index.js` is committed so end-users don't need to build. Always run `npm run build` and commit the updated
-`dist/index.js` together with your source changes.
+`dist/index.js` is committed so end-users don't need to build. On every push to `main`, the `Build dist bundle` GitHub
+Actions workflow rebuilds it and commits the result if it changed, so you don't need to commit it yourself.

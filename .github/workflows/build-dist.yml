@@ -1,0 +1,49 @@
+name: Build dist bundle
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+      - ".github/workflows/build-dist.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-dist
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm run build
+
+      # Commits pushed with GITHUB_TOKEN don't trigger new workflow runs, so this can't loop.
+      - name: Commit bundle if changed
+        run: |
+          if git diff --quiet -- dist/index.js; then
+            echo "dist/index.js is up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+          git add dist/index.js
+          git commit -m "Build dist bundle for ${GITHUB_SHA::7}"
+          git push
