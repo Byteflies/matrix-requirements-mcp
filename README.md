@@ -94,6 +94,12 @@ project (directory) you are currently in.
 | `get_folder_tree`     | Get the root folder tree for a project             |
 | `get_folder_children` | Get children of a specific folder                  |
 
+### Users & Groups
+
+| Tool          | Description                                                                                  |
+|---------------|----------------------------------------------------------------------------------------------|
+| `list_groups` | List all user groups; set `details: true` to include members and project permissions (requires ADMIN) |
+
 ### Items (CRUD)
 
 | Tool                        | Description                                          |
