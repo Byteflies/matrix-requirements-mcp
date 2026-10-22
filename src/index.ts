@@ -117,6 +117,8 @@ async function getSDK(): Promise<StandaloneMatrixSDK> {
     sdk = await createConsoleAPI({
       token: `Token ${MATRIX_TOKEN}`,
       url: MATRIX_URL!,
+      // The SDK refuses servers whose major.minor differs from its own, and SDK releases lag server upgrades.
+      skipSdkVersionCheck: true,
     }).catch(async (err: unknown) => {
       throw new Error(`Matrix login failed: ${await describeError(err)}`);
     });
