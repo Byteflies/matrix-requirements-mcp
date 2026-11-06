@@ -1,0 +1,28 @@
+# systemd user service: runs the server over Streamable HTTP on
+# http://127.0.0.1:8371/mcp, so clients (e.g. a sandboxed Claude Code) never see the token.
+#
+# Install:
+#   install -m 644 contrib/matrix-requirements-mcp.service ~/.config/systemd/user/
+#   # adjust ExecStart if the repository is not at ~/src/byteflies/matrix-requirements-mcp
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now matrix-requirements-mcp.service
+#
+# ~/.secrets/matrix.env (mode 600) holds the credentials:
+#   MATRIX_URL=https://byteflies.matrixreq.com
+#   MATRIX_TOKEN=...
+
+[Unit]
+Description=Matrix Requirements MCP server (http://127.0.0.1:8371/mcp)
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.secrets/matrix.env
+# EnvironmentFile wins over Environment=, so do not set MCP_HTTP_PORT in matrix.env.
+Environment=MCP_HTTP_PORT=8371
+ExecStart=/usr/bin/node %h/src/byteflies/matrix-requirements-mcp/dist/index.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
