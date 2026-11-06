@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ToolCallback } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createServer as createHttpServer, ServerResponse } from "node:http";
+import type { ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
 import { z } from "zod";
 import {
   createConsoleAPI,
@@ -258,14 +261,35 @@ async function putItemFields(
 // MCP Server
 // ---------------------------------------------------------------------------
 
-const server = new McpServer({
-  name: "matrix-requirements",
-  version: "1.0.1",
-});
+/**
+ * Tools are recorded here and registered on each McpServer that createServer() builds, so a fresh
+ * server can be made per connection.
+ */
+const toolRegistrations: ((server: McpServer) => void)[] = [];
+
+function tool<Args extends ZodRawShapeCompat>(
+  name: string,
+  description: string,
+  paramsSchema: Args,
+  cb: ToolCallback<Args>
+): void {
+  toolRegistrations.push((server) => server.tool(name, description, paramsSchema, cb));
+}
+
+function createServer(): McpServer {
+  const server = new McpServer({
+    name: "matrix-requirements",
+    version: "1.0.1",
+  });
+  for (const register of toolRegistrations) {
+    register(server);
+  }
+  return server;
+}
 
 // ---- List Projects --------------------------------------------------------
 
-server.tool("list_projects", "List all projects on the Matrix instance", {}, async () => {
+tool("list_projects", "List all projects on the Matrix instance", {}, async () => {
   const api = await getSDK();
   const projects = await api.getProjects();
   return {
@@ -275,7 +299,7 @@ server.tool("list_projects", "List all projects on the Matrix instance", {}, asy
 
 // ---- List Groups ----------------------------------------------------------
 
-server.tool(
+tool(
   "list_groups",
   "List all user groups on the Matrix instance, optionally with members and project permissions (details require ADMIN)",
   {
@@ -295,7 +319,7 @@ server.tool(
 
 // ---- Get Project Info -----------------------------------------------------
 
-server.tool(
+tool(
   "get_project_info",
   "Get configuration details for a project including categories and their fields",
   { project: z.string().describe("Project short name (e.g. 'PROJ')") },
@@ -322,7 +346,7 @@ server.tool(
 
 // ---- Browse Folder Tree ---------------------------------------------------
 
-server.tool(
+tool(
   "get_folder_tree",
   "Get the folder tree for a project. Returns the root folder with all children.",
   { project: z.string().describe("Project short name") },
@@ -337,7 +361,7 @@ server.tool(
 
 // ---- Get Folder Children --------------------------------------------------
 
-server.tool(
+tool(
   "get_folder_children",
   "Get the children (sub-folders and items) of a specific folder",
   {
@@ -359,7 +383,7 @@ server.tool(
 
 // ---- Get Item -------------------------------------------------------------
 
-server.tool(
+tool(
   "get_item",
   "Get a single item by ID, including all fields, links, and labels",
   {
@@ -377,7 +401,7 @@ server.tool(
 
 // ---- Search Items ---------------------------------------------------------
 
-server.tool(
+tool(
   "search_items",
   "Search for items in a project using MRQL or text search. Examples: 'mrql:category=REQ', 'mrql:category=REQ AND title~\"safety\"', or free-text search terms.",
   {
@@ -400,7 +424,7 @@ server.tool(
 
 // ---- Search Items with Details --------------------------------------------
 
-server.tool(
+tool(
   "search_items_with_details",
   "Search for items and return full item details (fields, links, labels). Use for smaller result sets.",
   {
@@ -419,7 +443,7 @@ server.tool(
 
 // ---- Create Item ----------------------------------------------------------
 
-server.tool(
+tool(
   "create_item",
   "Create a new item in a project within a specified folder",
   {
@@ -483,7 +507,7 @@ server.tool(
 
 // ---- Create Folder --------------------------------------------------------
 
-server.tool(
+tool(
   "create_folder",
   "Create a new folder in a project",
   {
@@ -522,7 +546,7 @@ server.tool(
 
 // ---- Update Item Title ----------------------------------------------------
 
-server.tool(
+tool(
   "update_item_title",
   "Update the title of an existing item",
   {
@@ -554,7 +578,7 @@ server.tool(
 
 // ---- Update Item Description ----------------------------------------------
 
-server.tool(
+tool(
   "update_item_description",
   "Update the description (richtext) field of an item. Use this instead of set_field when updating description/richtext fields, as it automatically locates the correct field by type rather than relying on an exact label match.",
   {
@@ -628,7 +652,7 @@ server.tool(
 
 // ---- Set Field ------------------------------------------------------------
 
-server.tool(
+tool(
   "set_field",
   "Set the value of a specific field on an item",
   {
@@ -660,7 +684,7 @@ server.tool(
 
 // ---- Set Multiple Fields --------------------------------------------------
 
-server.tool(
+tool(
   "set_fields",
   "Set multiple field values on an item at once",
   {
@@ -702,7 +726,7 @@ server.tool(
 
 // ---- Manage Links ---------------------------------------------------------
 
-server.tool(
+tool(
   "add_downlink",
   "Add a downlink (trace) from one item to another",
   {
@@ -732,7 +756,7 @@ server.tool(
   }
 );
 
-server.tool(
+tool(
   "remove_downlink",
   "Remove a downlink (trace) from one item to another",
   {
@@ -764,7 +788,7 @@ server.tool(
 
 // ---- Get Links ------------------------------------------------------------
 
-server.tool(
+tool(
   "get_links",
   "Get all uplinks and downlinks for an item",
   {
@@ -795,7 +819,7 @@ server.tool(
 
 // ---- Manage Labels --------------------------------------------------------
 
-server.tool(
+tool(
   "set_labels",
   "Set labels on an item (replaces existing labels)",
   {
@@ -827,7 +851,7 @@ server.tool(
 
 // ---- Delete Item ----------------------------------------------------------
 
-server.tool(
+tool(
   "delete_item",
   "Delete an item or folder from a project. For non-empty folders, set force=true.",
   {
@@ -857,7 +881,7 @@ server.tool(
 
 // ---- Move Items -----------------------------------------------------------
 
-server.tool(
+tool(
   "move_items",
   "Move one or more items to a different folder",
   {
@@ -887,7 +911,7 @@ server.tool(
 
 // ---- Get TODOs ------------------------------------------------------------
 
-server.tool(
+tool(
   "get_todos",
   "Get TODOs for a project, optionally filtered by item",
   {
@@ -944,7 +968,7 @@ async function fetchOpenTrainings(
   return results.flat().filter(isTraining);
 }
 
-server.tool(
+tool(
   "get_open_trainings",
   "Get open training TODOs (needTraining) grouped by user, for one project or all projects (other users' trainings may require ADMIN)",
   {
@@ -1115,7 +1139,7 @@ async function buildTrainingChanges(rest: any, todo: any, login: string, maxChar
   };
 }
 
-server.tool(
+tool(
   "get_training_changes",
   "For a user's open trainings (oldest first), return what changed in each document since the version the user " +
     "last trained on: the change log of versions in between and a paragraph-level diff of the text fields " +
@@ -1171,7 +1195,7 @@ server.tool(
 
 // ---- Generate Document ----------------------------------------------------
 
-server.tool(
+tool(
   "generate_document",
   "Export a DOC item to PDF, HTML, DOCX, or ODT format",
   {
@@ -1199,7 +1223,7 @@ server.tool(
 
 // ---- Get Test Steps Config ------------------------------------------------
 
-server.tool(
+tool(
   "get_test_steps_config",
   "Get the column configuration for test case steps in a project. Call this before set_test_steps to discover the available column field names (e.g. 'action', 'expected', etc.).",
   {
@@ -1218,7 +1242,7 @@ server.tool(
 
 // ---- Get Test Steps -------------------------------------------------------
 
-server.tool(
+tool(
   "get_test_steps",
   "Get the test case steps from a TC item as a structured array",
   {
@@ -1274,7 +1298,7 @@ server.tool(
 
 // ---- Set Test Steps -------------------------------------------------------
 
-server.tool(
+tool(
   "set_test_steps",
   "Set (replace) test case steps on a TC item. Each step is an object whose keys are column field names — call get_test_steps_config first to discover those names. All existing steps are replaced.",
   {
@@ -1351,7 +1375,7 @@ server.tool(
 
 // ---- Get Audit Log --------------------------------------------------------
 
-server.tool(
+tool(
   "get_audit",
   "Get the audit/change log for a project",
   {
@@ -1384,9 +1408,79 @@ server.tool(
 // Start the server
 // ---------------------------------------------------------------------------
 
+/** Loopback only: the server holds the Matrix token, so it must not be reachable from the network. */
+const HTTP_HOST = "127.0.0.1";
+const HTTP_PATH = "/mcp";
+
+function sendJsonRpcError(res: ServerResponse, status: number, message: string): void {
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message }, id: null }));
+}
+
+/**
+ * Serve MCP over Streamable HTTP in stateless mode: every POST gets its own server and transport,
+ * so there is no session state to keep. GET (server-initiated SSE stream) and DELETE (session end)
+ * only make sense with sessions, so they are rejected with 405, which clients accept.
+ */
+async function serveHttp(port: number): Promise<void> {
+  // The Host check blocks DNS rebinding: a web page whose hostname resolves to 127.0.0.1 can reach the
+  // port from a browser, but its requests carry its own hostname in Host.
+  const allowedHosts = [`${HTTP_HOST}:${port}`, `localhost:${port}`];
+
+  const httpServer = createHttpServer(async (req, res) => {
+    const path = new URL(req.url ?? "/", "http://localhost").pathname;
+    if (path !== HTTP_PATH) {
+      sendJsonRpcError(res, 404, `Not found; the MCP endpoint is ${HTTP_PATH}`);
+      return;
+    }
+    if (req.method !== "POST") {
+      res.setHeader("Allow", "POST");
+      sendJsonRpcError(res, 405, "Method not allowed; this server is stateless and only accepts POST");
+      return;
+    }
+
+    const server = createServer();
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableDnsRebindingProtection: true,
+      allowedHosts,
+    });
+    res.on("close", () => {
+      transport.close();
+      server.close();
+    });
+    try {
+      await server.connect(transport);
+      await transport.handleRequest(req, res);
+    } catch (err) {
+      console.error("Error handling MCP request:", err);
+      if (!res.headersSent) sendJsonRpcError(res, 500, "Internal server error");
+    }
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    httpServer.once("error", reject);
+    httpServer.listen(port, HTTP_HOST, resolve);
+  });
+  console.error(
+    `Matrix Requirements MCP server listening on http://${HTTP_HOST}:${port}${HTTP_PATH}`
+  );
+}
+
 async function main() {
+  // MCP_HTTP_PORT selects the Streamable HTTP transport; without it the server speaks stdio.
+  const httpPort = process.env.MCP_HTTP_PORT;
+  if (httpPort) {
+    const port = Number(httpPort);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error(`MCP_HTTP_PORT must be a port number between 1 and 65535, got '${httpPort}'.`);
+    }
+    await serveHttp(port);
+    return;
+  }
+
   const transport = new StdioServerTransport();
-  await server.connect(transport);
+  await createServer().connect(transport);
   console.error("Matrix Requirements MCP server running on stdio");
 }
 

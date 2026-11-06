@@ -93,6 +93,34 @@ cd $PATH_TO_PROJECT
 git pull
 ```
 
+## HTTP server
+
+To use the server from a client that must not hold the token, for example Claude Code in a sandbox, run it as a separate service that listens over HTTP.
+
+With `MCP_HTTP_PORT` set, the server speaks Streamable HTTP on `http://127.0.0.1:$MCP_HTTP_PORT/mcp` instead of stdio.
+It always listens on loopback only.
+Requests whose `Host` header is not `127.0.0.1:<port>` or `localhost:<port>` are rejected, so web pages in a local browser cannot reach the server through DNS rebinding.
+Anything else running as a local user can call every tool, with the permissions of the token.
+
+[`contrib/matrix-requirements-mcp.service`](contrib/matrix-requirements-mcp.service) is a systemd user service that runs the server on port 8371.
+It reads `MATRIX_URL` and `MATRIX_TOKEN` from `~/.secrets/matrix.env`:
+
+```bash
+install -d -m 700 ~/.secrets
+install -m 600 /dev/null ~/.secrets/matrix.env
+$EDITOR ~/.secrets/matrix.env   # MATRIX_URL=https://byteflies.matrixreq.com and MATRIX_TOKEN=<token>
+install -m 644 contrib/matrix-requirements-mcp.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now matrix-requirements-mcp.service
+```
+
+Adjust `ExecStart` in the unit if the repository is not at `~/src/byteflies/matrix-requirements-mcp`.
+Then point Claude Code at it, without any token:
+
+```bash
+claude mcp add --scope user --transport http matrix-requirements http://127.0.0.1:8371/mcp
+```
+
 ## Available Tools
 
 ### Project & Navigation
