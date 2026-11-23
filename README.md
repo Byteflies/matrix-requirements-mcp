@@ -109,12 +109,14 @@ It reads `MATRIX_URL` and `MATRIX_TOKEN` from `~/.secrets/matrix.env`:
 install -d -m 700 ~/.secrets
 install -m 600 /dev/null ~/.secrets/matrix.env
 $EDITOR ~/.secrets/matrix.env   # MATRIX_URL=https://byteflies.matrixreq.com and MATRIX_TOKEN=<token>
-install -m 644 contrib/matrix-requirements-mcp.service ~/.config/systemd/user/
+install -d ~/.config/systemd/user
+sed "/^ExecStart=/s|@REPO@|$PWD|" contrib/matrix-requirements-mcp.service > ~/.config/systemd/user/matrix-requirements-mcp.service
 systemctl --user daemon-reload
 systemctl --user enable --now matrix-requirements-mcp.service
 ```
 
-Adjust `ExecStart` in the unit if the repository is not at `~/src/byteflies/matrix-requirements-mcp`.
+Run these from the repository root: the `sed` command fills in the repository path in `ExecStart`.
+On systems without systemd, such as macOS, run `MCP_HTTP_PORT=8371 node dist/index.js` with `MATRIX_URL` and `MATRIX_TOKEN` set, under whatever keeps a process running there (e.g. launchd).
 Then point Claude Code at it, without any token:
 
 ```bash
