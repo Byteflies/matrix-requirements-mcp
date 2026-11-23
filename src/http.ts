@@ -17,6 +17,10 @@ function sendJsonRpcError(res: ServerResponse, status: number, message: string):
  * Serve MCP over Streamable HTTP in stateless mode: every POST gets its own server and transport,
  * so there is no session state to keep. GET (server-initiated SSE stream) and DELETE (session end)
  * only make sense with sessions, so they are rejected with 405, which clients accept.
+ *
+ * The server cannot be shared between requests: an McpServer is connected to one transport at a time,
+ * and a second connect() throws "Already connected to a transport". Building one only registers the
+ * tools, so doing it per request is cheap.
  */
 export async function serveHttp(port: number, createServer: () => McpServer): Promise<void> {
   // The Host check blocks DNS rebinding: a web page whose hostname resolves to 127.0.0.1 can reach the
